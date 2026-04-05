@@ -38,8 +38,11 @@ def run(args):
     raw_path = REPO / "results" / "raw" / "exp2_asr_budget.json"
     outcomes_raw = json.loads(raw_path.read_text())
 
-    # Filter to successful attacks only.
+    # Filter to successful attacks only (optionally restrict by victim model).
     successful = [o for o in outcomes_raw if o["judged_harmful"]]
+    if args.model:
+        successful = [o for o in successful
+                      if o.get("metadata", {}).get("model") == args.model]
     log.info("scoring %d successful attack outcomes", len(successful))
 
     lg = LlamaGuardFilter() if not args.skip_llama_guard else None
@@ -96,6 +99,8 @@ def run(args):
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--model", default=None,
+                   help="filter to attacks against this victim model only")
     p.add_argument("--ppl-threshold", type=float, default=100.0)
     p.add_argument("--skip-llama-guard", action="store_true")
     p.add_argument("--use-perspective", action="store_true")

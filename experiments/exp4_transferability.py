@@ -47,7 +47,7 @@ def run(args):
     all_outcomes = json.loads(outcomes_path.read_text())
 
     # Source-model successful ARA attacks
-    source = exp["source"]
+    source = args.model or exp["source"]
     successful = [
         o for o in all_outcomes
         if o["attack_name"].startswith("ara-k") and o["judged_harmful"]
@@ -105,6 +105,8 @@ def run(args):
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--model", default=None,
+                   help="override the source model (default from configs/experiments.yaml exp4.source)")
     return p.parse_args()
 
 
