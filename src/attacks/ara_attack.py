@@ -163,8 +163,12 @@ class ARAAttack:
                 )
 
         # 4. Continuous optimisation.
+        # Size the mask against the model's embedding matrix rows — some
+        # families (LLaMA-3, Gemma) expose more embedding rows than
+        # ``tokenizer.vocab_size`` (added special-token heads).
+        mask_vocab = int(self.embedding_matrix().shape[0])
         allowed_mask = _build_token_mask(
-            vocab_size=self.tokenizer.vocab_size,
+            vocab_size=mask_vocab,
             tokenizer=self.tokenizer,
             exclude_special=self.config.exclude_special_tokens,
             device=self._device,

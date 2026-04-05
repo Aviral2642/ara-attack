@@ -165,7 +165,20 @@ class ARAOptimizer:
         if allowed_mask is not None:
             # Pre-mask disallowed tokens with a large negative bias so
             # they are effectively excluded throughout optimisation.
+            # The mask is sized against ``tokenizer.vocab_size`` upstream;
+            # however, some families (e.g. LLaMA-3) expose an embedding
+            # matrix wider than ``vocab_size`` (added special-token rows).
+            # Pad/trim the mask to match the logit width exactly.
             bias = torch.zeros_like(logits)
+            vocab_size = bias.shape[1]
+            if allowed_mask.shape[0] < vocab_size:
+                allowed_mask = torch.nn.functional.pad(
+                    allowed_mask,
+                    (0, vocab_size - allowed_mask.shape[0]),
+                    value=False,
+                )
+            elif allowed_mask.shape[0] > vocab_size:
+                allowed_mask = allowed_mask[:vocab_size]
             bias[:, ~allowed_mask.to(self.device)] = -1e4
             logits = logits + bias
         logits = logits.detach().requires_grad_(True)

@@ -35,6 +35,28 @@ from .model_loader import ModelSpec, iter_attention_modules
 log = logging.getLogger(__name__)
 
 
+def _map_normalised_to_original(original: str, norm_idx: int) -> int:
+    """Map an index in whitespace-normalised text back to the original.
+
+    Used by ``locate_system_span`` for its final fallback. We walk
+    ``original`` character by character; every run of whitespace in
+    the original contributes exactly one char in the normalised form.
+    """
+    import re
+    out = 0
+    i = 0
+    while i < len(original) and out < norm_idx:
+        if original[i].isspace():
+            # collapse a whitespace run into a single char in norm.
+            out += 1
+            while i < len(original) and original[i].isspace():
+                i += 1
+        else:
+            out += 1
+            i += 1
+    return i
+
+
 @dataclass
 class TokenSpan:
     """Half-open range [start, end) of token positions in a tokenised prompt."""
@@ -177,39 +199,92 @@ class AttentionExtractor:
         """Return [start, end) of the system-prompt tokens within a
         tokenised chat sequence.
 
-        We tokenise the system prompt in isolation, then find its token
-        id subsequence inside ``input_ids``. If the subsequence is not
-        found (which can happen when the chat template inserts role
-        markers mid-prompt), we fall back to byte-level offsets.
+        Chat templates (LLaMA-2's ``[INST]<<SYS>>``, LLaMA-3's
+        ``<|start_header_id|>system<|end_header_id|>``, Mistral's,
+        Gemma's) wrap the system prompt with role markers. BPE encodes
+        leading whitespace, so tokenising the system prompt in isolation
+        rarely produces the same token id sequence as in context. We
+        therefore use a three-stage strategy:
+
+        1. direct subsequence match (cheap; may succeed for simple cases);
+        2. subsequence match after trying common leading prefixes
+           (``\"\"``, ``\" \"``, ``\"\\n\"``, ``\"\\n\\n\"``);
+        3. char-level alignment: decode each token individually,
+           accumulate character spans, then locate the system prompt
+           in the concatenated text and map back to token indices.
         """
-        needle = self.tokenizer(system_prompt, add_special_tokens=False)["input_ids"]
-        if not needle:
+        if not system_prompt:
             raise ValueError("empty system prompt")
         haystack = input_ids[0].tolist()
-        L = len(needle)
-        for i in range(len(haystack) - L + 1):
-            if haystack[i : i + L] == needle:
-                return TokenSpan(i, i + L, label="system")
-        # Fallback: locate via decoded offsets.
-        full = self.tokenizer.decode(haystack)
-        pos = full.find(system_prompt)
-        if pos < 0:
-            raise RuntimeError(
-                "system prompt could not be located in tokenised chat sequence"
-            )
-        # Approximate: walk the tokens, cumulating decoded length.
-        cum = 0
-        start = end = None
-        for i, tok in enumerate(haystack):
-            piece = self.tokenizer.decode([tok])
-            if start is None and cum + len(piece) > pos:
-                start = i
-            cum += len(piece)
-            if start is not None and cum >= pos + len(system_prompt):
-                end = i + 1
+
+        # (1) direct subsequence
+        needle = self.tokenizer(system_prompt, add_special_tokens=False)["input_ids"]
+        if needle:
+            L = len(needle)
+            for i in range(len(haystack) - L + 1):
+                if haystack[i : i + L] == needle:
+                    return TokenSpan(i, i + L, label="system")
+
+        # (2) leading-prefix variants (handles BPE context sensitivity)
+        for prefix in (" ", "\n", "\n\n", "  "):
+            variant = self.tokenizer(
+                prefix + system_prompt, add_special_tokens=False
+            )["input_ids"]
+            if not variant:
+                continue
+            Lv = len(variant)
+            for i in range(len(haystack) - Lv + 1):
+                if haystack[i : i + Lv] == variant:
+                    # Drop the first variant token (the prefix) from the span.
+                    return TokenSpan(i + 1, i + Lv, label="system")
+
+        # (3) char-level alignment — decode each token and build offsets.
+        pieces = [
+            self.tokenizer.decode([tid], skip_special_tokens=False)
+            for tid in haystack
+        ]
+        full_text = "".join(pieces)
+        # Try the prompt both verbatim and with common surrounding whitespace.
+        pos = -1
+        for probe in (system_prompt, " " + system_prompt, "\n" + system_prompt,
+                      "\n\n" + system_prompt):
+            j = full_text.find(probe)
+            if j >= 0:
+                # Skip over any prefix we added in the probe.
+                pos = j + (len(probe) - len(system_prompt))
                 break
-        if start is None or end is None:
-            raise RuntimeError("fallback span localisation failed")
+        if pos < 0:
+            # Try whitespace-normalised fallback: both sides collapsed.
+            import re
+            norm_text = re.sub(r"\s+", " ", full_text)
+            norm_sys = re.sub(r"\s+", " ", system_prompt).strip()
+            j = norm_text.find(norm_sys)
+            if j < 0:
+                raise RuntimeError(
+                    "system prompt could not be located in tokenised chat sequence; "
+                    "inspect the chat template render for "
+                    f"family={self.spec.family!r}"
+                )
+            # Map normalised index back to original text by char walk.
+            orig_j = _map_normalised_to_original(full_text, j)
+            pos = orig_j
+        end_pos = pos + len(system_prompt)
+
+        # Map character offsets to token indices.
+        cursor = 0
+        start = end = None
+        for i, piece in enumerate(pieces):
+            piece_start, piece_end = cursor, cursor + len(piece)
+            if start is None and piece_end > pos:
+                start = i
+            if start is not None and piece_start >= end_pos:
+                end = i
+                break
+            cursor = piece_end
+        if end is None:
+            end = len(pieces)
+        if start is None or end <= start:
+            raise RuntimeError("char-level span localisation failed")
         return TokenSpan(start, end, label="system")
 
     def locate_output_span(self, input_ids: Tensor) -> TokenSpan:
