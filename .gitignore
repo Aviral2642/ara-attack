@@ -1,0 +1,24 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.egg-info/
+dist/
+build/
+results/raw/
+results/logs/
+results/figures/
+.venv/
+venv/
+*.pt
+*.bin
+*.safetensors
+wandb/
+.DS_Store
+
+# Local additions
+.pytest_cache/
+.coverage
+htmlcov/
+*.key
+models_cache/

@@ -1,0 +1,46 @@
+# Core ML stack — pin to versions with LLaMA-2/3, Mistral, Gemma-2 support
+# Tested with Python 3.11 / 3.12 (avoid 3.14 until upstream wheels ship).
+torch==2.4.1
+transformers==4.45.2
+accelerate==1.0.1
+tokenizers==0.20.1
+sentencepiece==0.2.0
+safetensors==0.4.5
+bitsandbytes==0.44.1 ; platform_system != "Darwin"  # GPU quantization
+einops==0.8.0
+
+# Scientific stack
+numpy==1.26.4
+scipy==1.14.1
+scikit-learn==1.5.2
+pandas==2.2.3
+
+# Plotting (publication-quality)
+matplotlib==3.9.2
+seaborn==0.13.2
+
+# Benchmarks / datasets
+datasets==3.0.2
+huggingface-hub==0.25.2
+
+# Evaluation / judges
+openai==1.54.3           # GPT-4 judge (optional; uses OPENAI_API_KEY)
+anthropic==0.39.0        # Claude judge (optional)
+
+# Safety filters
+# llama-guard via HF transformers directly (no extra dep)
+perspective==1.1.0       # Perspective API client (optional; PERSPECTIVE_API_KEY)
+
+# Statistical tests / bootstrap
+statsmodels==0.14.4
+
+# Config / logging / progress
+pyyaml==6.0.2
+tqdm==4.66.5
+wandb==0.18.5            # optional experiment tracking
+rich==13.9.3
+
+# Testing
+pytest==8.3.3
+pytest-cov==5.0.0
+hypothesis==6.115.5

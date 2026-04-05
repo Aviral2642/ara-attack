@@ -1,0 +1,92 @@
+# Model configurations — paths, tokenizer options, chat templates.
+# Each entry is the canonical name used throughout the codebase.
+#
+# PRIMARY (default) model: llama-3-8b-instruct.
+# LLaMA-2 entries are retained as secondary targets — re-enable once
+# meta-llama/Llama-2-7b-chat-hf access is granted on HuggingFace.
+
+default_model: llama-3-8b-instruct
+
+defaults:
+  torch_dtype: bfloat16
+  device_map: auto
+  trust_remote_code: false
+  attn_implementation: eager         # required for gradient-preserving attention hooks
+  low_cpu_mem_usage: true
+
+models:
+  # ---- PRIMARY ---------------------------------------------------------
+  llama-3-8b-instruct:
+    hf_id: meta-llama/Meta-Llama-3-8B-Instruct
+    family: llama
+    n_layers: 32
+    n_heads: 32
+    d_model: 4096
+    context_len: 8192
+    chat_template: llama3
+    # positions of system-prompt tokens are identified at runtime via
+    # AttentionExtractor.locate_system_span() using the tokenized template.
+
+  # ---- SECONDARY (access granted) --------------------------------------
+  mistral-7b-instruct-v0.1:
+    hf_id: mistralai/Mistral-7B-Instruct-v0.1
+    family: mistral
+    n_layers: 32
+    n_heads: 32
+    d_model: 4096
+    context_len: 8192
+    chat_template: mistral
+
+  # ---- SECONDARY (access pending / optional) ---------------------------
+  llama-2-7b-chat:
+    hf_id: meta-llama/Llama-2-7b-chat-hf
+    family: llama
+    n_layers: 32
+    n_heads: 32
+    d_model: 4096
+    context_len: 4096
+    chat_template: llama2
+
+  llama-2-13b-chat:
+    hf_id: meta-llama/Llama-2-13b-chat-hf
+    family: llama
+    n_layers: 40
+    n_heads: 40
+    d_model: 5120
+    context_len: 4096
+    chat_template: llama2
+
+  mistral-7b-instruct-v0.3:
+    hf_id: mistralai/Mistral-7B-Instruct-v0.3
+    family: mistral
+    n_layers: 32
+    n_heads: 32
+    d_model: 4096
+    context_len: 32768
+    chat_template: mistral
+
+  gemma-2-9b-it:
+    hf_id: google/gemma-2-9b-it
+    family: gemma2
+    n_layers: 42
+    n_heads: 16
+    d_model: 3584
+    context_len: 8192
+    chat_template: gemma
+
+# Judge model for harmful-content classification in exp2.
+judges:
+  llama-3-70b-instruct:
+    hf_id: meta-llama/Meta-Llama-3-70B-Instruct
+    role: primary
+  gpt-4-turbo:
+    api: openai
+    model: gpt-4-turbo-2024-04-09
+    role: secondary           # inter-rater agreement / ablation
+
+# Safety filter models.
+filters:
+  llama-guard-3-8b:
+    hf_id: meta-llama/Llama-Guard-3-8B
+  perplexity-reference:
+    hf_id: gpt2-large         # independent PPL model (NOT the attacked model)

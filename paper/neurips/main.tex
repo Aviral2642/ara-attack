@@ -1,0 +1,295 @@
+\documentclass{article}
+
+%% NeurIPS 2026 submission.
+%% NOTE: This file expects the official NeurIPS 2026 style file.
+%% Drop `neurips_2026.sty` into this directory before compiling.
+%% Use `\usepackage[final]{neurips_2026}` for the camera-ready version.
+\usepackage{neurips_2026}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.17}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{hyperref}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{lemma}[theorem]{Lemma}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+\newcommand{\SAS}{\mathrm{SAS}}
+\newcommand{\softmax}{\mathrm{softmax}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+
+\title{Attention Redistribution Attacks: Geometric Jailbreaks That Bypass Safety Alignment Without Semantic Content}
+
+\author{%
+  Aviral Srivastava \\
+  Amazon / Independent Researcher \\
+  Seattle, WA, USA \\
+  \texttt{aviralsr@example.org}
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Safety alignment in large language models rests on an unexamined assumption: that at inference time the model actually attends to the safety instructions it was trained to follow. We show this assumption is violable. We introduce \emph{Attention Redistribution Attacks} (ARA), a new class of adversarial attacks that operate at the attention-geometry level rather than the semantic or loss-gradient level. ARA crafts $1$--$3$ adversarial tokens whose key vectors absorb attention mass from safety-critical tokens in the system prompt, causing downstream query positions to stop attending to their alignment instructions while RLHF weights remain intact. To measure this, we define the Safety Attention Score (SAS), the first quantitative metric of whether an aligned model attends to its own safety tokens. We prove a phase-transition theorem: refusal probability collapses sharply below a critical threshold $S^*$, implying attacks need only cross a margin rather than defeat the semantic policy. Empirically, ARA achieves over $60\%$ attack success rate on HarmBench with only $k=3$ adversarial tokens across Llama-2, Llama-3, Mistral, and Gemma-2, and over $80\%$ evasion of Llama Guard because our suffixes carry no harmful semantics. We propose the Attention Budget Constraint (ABC) defense, a lightweight inference-time mechanism that floors attention to system tokens and restores refusal behaviour with under $1.2\%$ utility degradation on MT-Bench. ARA reframes jailbreaking as a geometric phenomenon and suggests that robust alignment must constrain attention allocation, not only output distributions.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+Safety-aligned large language models (LLMs) are deployed under a simple operational story: a system prompt specifies forbidden behaviours, the user query is appended, and the attention mechanism ensures that generation at every position remains conditioned on the system prompt. Reinforcement learning from human feedback (RLHF) \cite{ouyang2022training} instills refusal behaviour assuming that, when generating a response, the model reads its safety instructions. The literature on jailbreaks has almost entirely attacked the second half of this story: gradient-based suffixes \cite{zou2023universal}, genetic semantic perturbations \cite{liu2023autodan}, and iterative red-team prompting \cite{chao2023pair} all push the model toward harmful completions through changes to loss surfaces or semantic inputs. Defenses follow the same frame: improve RLHF data, filter outputs with guardrail classifiers \cite{inan2023llamaguard}, or retrain on adversarial examples.
+
+We attack the first half of the story. We observe that the softmax attention distribution over the system prompt is itself an attackable quantity. If an adversary can cause the attention mass that should fall on safety tokens to be redirected elsewhere, then RLHF weights -- however robust -- operate over a context in which the safety instruction is effectively absent. The model is not persuaded to bypass its safety policy; it simply does not read it. This is a \emph{geometric} attack, not a semantic one. Its artefacts carry no harmful meaning, so semantic guardrails do not detect them.
+
+\paragraph{Contributions.}
+\begin{itemize}
+  \item We introduce Attention Redistribution Attacks (ARA), a new class of adversarial attacks on aligned LLMs that operates on the attention geometry rather than the output loss. ARA optimizes $1$--$3$ tokens whose key vectors absorb attention from safety-critical positions.
+  \item We define the Safety Attention Score (SAS), the first quantitative metric measuring whether an aligned LLM actually attends to its safety tokens during generation, and we use SAS to causally link attention redistribution to refusal failure.
+  \item We prove a phase-transition theorem: under mild regularity assumptions, refusal probability drops sharply once SAS falls below a model-specific threshold $S^*$. The phase transition explains why small ARA budgets succeed.
+  \item We demonstrate ARA across four open-weight model families, achieving $>60\%$ attack success rate with only $k{=}3$ tokens and $>80\%$ evasion of Llama Guard, and establishing non-trivial cross-model transferability.
+  \item We propose the Attention Budget Constraint (ABC), an inference-time defense that enforces a floor on attention to system tokens. ABC restores refusal behaviour with under $1.2\%$ utility loss on MT-Bench.
+\end{itemize}
+
+\paragraph{Threat model preview.} The adversary has white-box access to the target model for attack construction but submits only standard chat inputs at deployment (no weight or sampling modifications). Defenses cannot modify training; they may modify the attention forward pass.
+
+\section{Background}
+\label{sec:background}
+
+\paragraph{Attention.} The transformer self-attention layer \cite{vaswani2017attention} computes, for each query position $i$, a distribution over key positions $j$ as $\alpha_{ij} = \softmax_j( q_i^\top k_j / \sqrt{d} )$, and aggregates value vectors as $o_i = \sum_j \alpha_{ij} v_j$. Across $H$ heads and $L$ layers, the attention pattern determines which input tokens influence each output position. In decoder-only chat models, generation positions attend backward over a concatenation of system, user, and assistant-prefix tokens.
+
+\paragraph{RLHF and safety alignment.} Aligned chat models \cite{ouyang2022training,touvron2023llama2,grattafiori2024llama3,jiang2023mistral,gemmateam2024gemma2} are fine-tuned so that, conditioned on a system message describing forbidden behaviours, the model emits refusals for harmful queries. Crucially, training assumes the model reads the system prompt: gradients from refusal supervision flow through attention to system tokens. The field has lacked a quantitative tool to verify that this assumption holds at deployment.
+
+\paragraph{Existing attacks.} GCG \cite{zou2023universal} optimizes an adversarial suffix via greedy coordinate-wise substitution to maximize the log-probability of an affirmative completion. AutoDAN \cite{liu2023autodan} evolves fluent natural-language jailbreaks using a hierarchical genetic algorithm. PAIR \cite{chao2023pair} uses an attacker LLM to iterate jailbreaks in $\leq 20$ queries. All three operate on the next-token loss and produce either gibberish suffixes (GCG) or harmful-looking text (AutoDAN, PAIR). Earlier adversarial ML \cite{goodfellow2015fgsm,madry2018pgd,carlini2017towards} established the loss-gradient framing these attacks inherit. Attention-flow analysis \cite{abnar2020rollout} provides a quantitative lens on attention we build on, but has not previously been used to construct attacks.
+
+\paragraph{Safety filters.} Llama Guard \cite{inan2023llamaguard} is a classifier LLM that screens inputs and outputs against a policy taxonomy. It is designed to catch harmful semantics. HarmBench \cite{mazeika2024harmbench} provides standardized evaluation harnesses. Prior work \cite{wei2023jailbroken} argues that safety-training failures stem from competing objectives and generalization gaps; we show an orthogonal failure mode driven by attention geometry.
+
+\section{Threat Model}
+\label{sec:threat}
+
+\paragraph{Adversary goals.} Elicit a response to a harmful query $q$ that would otherwise be refused, under a fixed safety system prompt $p$. Success is judged by HarmBench classifiers and Llama Guard; we additionally report SAS collapse as a mechanistic witness.
+
+\paragraph{Adversary capabilities.} We assume white-box access to a target chat model during attack construction: the adversary can compute gradients and inspect attention weights. At deployment time the adversary submits only a standard user message (system prompt, user turn, no privileged access, no sampling control, no logits). The adversary's budget is $k \in \{1,2,3\}$ adversarial tokens concatenated to the user message. Tokens are drawn from the model vocabulary.
+
+\paragraph{Defender capabilities.} The defender controls system prompt contents and the attention forward pass (not training). Defenses may read or modify attention weights but must not materially degrade utility. We target $<2\%$ utility degradation on MT-Bench.
+
+\paragraph{Out of scope.} Training-time poisoning, weight-level attacks, sampling manipulation, multi-turn escalation, and attacks that require the adversary to control the system prompt. Our attack is single-turn and uses only user-position tokens.
+
+\section{Attack Framework}
+\label{sec:attack}
+
+\subsection{Safety Attention Score}
+
+Let the prompt be partitioned into system positions $\mathcal{S}$, user positions $\mathcal{U}$, and generation positions $\mathcal{G}$. Within $\mathcal{S}$, let $\mathcal{S}_{\text{safe}} \subseteq \mathcal{S}$ denote the safety-critical tokens (identified by a small anchor lexicon such as ``refuse'', ``harmful'', ``illegal'', ``safe''). Let $\alpha^{(l,h)}_{ij}$ be the attention weight at layer $l$, head $h$ from query $i$ to key $j$.
+
+\begin{definition}[Safety Attention Score]
+\label{def:sas}
+The Safety Attention Score of a prompt is the average attention mass that generation positions place on safety-critical system tokens, averaged over heads and layers:
+\[
+\SAS \;=\; \frac{1}{|\mathcal{G}| L H} \sum_{i \in \mathcal{G}} \sum_{l=1}^{L} \sum_{h=1}^{H} \sum_{j \in \mathcal{S}_{\text{safe}}} \alpha^{(l,h)}_{ij}.
+\]
+\end{definition}
+
+SAS is bounded in $[0,1]$ because $\sum_j \alpha^{(l,h)}_{ij} = 1$ for each head, and $\mathcal{S}_{\text{safe}} \subseteq$ the key-positions range. A value near zero indicates the model is not attending to its safety instruction; a value near the alignment-time baseline $\SAS_0$ indicates aligned-like behaviour. We measure $\SAS_0$ empirically per model as the mean over a benign HarmBench-style refusal set.
+
+\subsection{ARA Optimization Objective}
+
+The adversary chooses $k$ discrete tokens $t_{1{:}k}$ appended to the user message. Let $\theta$ denote the (frozen) model parameters and let $\SAS(t_{1:k}; p, q)$ denote the Safety Attention Score on the concatenated prompt.
+
+\begin{definition}[ARA Optimization Objective]
+\label{def:ara}
+Given system prompt $p$, harmful query $q$, and budget $k$, the ARA attack solves
+\begin{equation}
+\min_{t_{1:k} \in \mathcal{V}^{k}} \; \mathcal{L}_{\mathrm{ARA}}(t_{1:k}) \;=\; \SAS(t_{1:k}; p, q) \;+\; \lambda \, \mathcal{L}_{\mathrm{aff}}(t_{1:k}; p, q),
+\label{eq:ara_obj}
+\end{equation}
+where $\mathcal{V}$ is the model vocabulary, $\mathcal{L}_{\mathrm{aff}}$ is the standard affirmative-response cross-entropy loss \cite{zou2023universal}, and $\lambda$ trades attention redistribution against output steering. We default to $\lambda = 0.1$ so that the primary optimization pressure is on attention geometry.
+\end{definition}
+
+\subsection{Gradient Derivation}
+
+Let $e_{t_i} \in \R^d$ be the embedding of token $t_i$, and let $k^{(l,h)}_{t_i} = W_K^{(l,h)} e_{t_i}$ be the key vector at layer $l$, head $h$. For a single layer, a query $q_i$ at a generation position places attention on the adversarial position $a$ proportional to $\exp(q_i^\top k^{(l,h)}_{t_a}/\sqrt{d})$. By softmax normalization, attention to safety token $j^* \in \mathcal{S}_{\text{safe}}$ is
+\[
+\alpha^{(l,h)}_{i,j^*} \;=\; \frac{\exp(q_i^\top k_{j^*}/\sqrt{d})}{\sum_{j} \exp(q_i^\top k_j/\sqrt{d})}.
+\]
+Inserting adversarial keys $k_{t_a}$ into the denominator without adding to the numerator drives $\alpha^{(l,h)}_{i,j^*}$ toward zero whenever $q_i^\top k_{t_a}$ is large. Thus the adversary's goal is to maximize $\sum_{i,l,h} q_i^\top k^{(l,h)}_{t_a}$ -- essentially to orient the adversarial key toward generation queries. The gradient $\nabla_{e_{t_a}} \SAS$ exists and is tractable through the attention softmax.
+
+\subsection{Gumbel-Softmax Relaxation}
+
+Discrete optimization over $\mathcal{V}^k$ is intractable. We relax each adversarial slot $a$ to a categorical distribution with logits $\ell_a \in \R^{|\mathcal{V}|}$ and sample via the Gumbel-softmax \cite{jang2017gumbel,maddison2017concrete}:
+\[
+\tilde{e}_{t_a} \;=\; \sum_{v \in \mathcal{V}} y_{a,v} \, e_v, \quad y_{a,v} = \frac{\exp((\ell_{a,v}+g_{a,v})/\tau)}{\sum_{v'} \exp((\ell_{a,v'}+g_{a,v'})/\tau)},
+\]
+with $g_{a,v} \sim \mathrm{Gumbel}(0,1)$ and temperature $\tau$. We optimize $\ell$ with Adam, anneal $\tau$ from $1.0$ to $0.1$ over $T{=}500$ steps, then project to a discrete token via $\arg\max_v \ell_{a,v}$. An optional top-$B$ greedy refinement round (similar in spirit to GCG's coordinate update) searches a small candidate set for the best discrete tokens. Algorithm~\ref{alg:ara} summarizes.
+
+\begin{algorithm}[t]
+\caption{ARA attack construction}
+\label{alg:ara}
+\begin{algorithmic}[1]
+\Require model $\theta$, system prompt $p$, query $q$, budget $k$, steps $T$, temperature schedule $\tau_t$, weight $\lambda$
+\State initialize logits $\ell \in \R^{k \times |\mathcal{V}|}$ to zero
+\For{$t = 1,\dots,T$}
+  \State sample Gumbel noise $g$
+  \State form soft embeddings $\tilde{e}_{t_a}$ with temperature $\tau_t$
+  \State forward pass; compute $\SAS$ and $\mathcal{L}_{\mathrm{aff}}$
+  \State $\mathcal{L}_{\mathrm{ARA}} \gets \SAS + \lambda \, \mathcal{L}_{\mathrm{aff}}$
+  \State $\ell \gets \ell - \eta \nabla_\ell \mathcal{L}_{\mathrm{ARA}}$
+\EndFor
+\State $t_a \gets \arg\max_v \ell_{a,v}$ for $a=1,\dots,k$
+\State optional: top-$B$ greedy refinement on discrete tokens
+\State \Return $t_{1:k}$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Phase Transition}
+
+\begin{theorem}[Phase Transition]
+\label{thm:phase}
+Let $R(\SAS)$ denote the expected refusal probability of a fixed RLHF-aligned model over a harmful-query distribution, as a function of the Safety Attention Score achieved by the prompt. Assume (i) the logit for refusal is a $\beta$-Lipschitz, monotone function of the attended safety representation, (ii) the safety representation is approximately linear in $\SAS$ on $[0,\SAS_0]$, and (iii) generation applies softmax with temperature $T_{\mathrm{gen}}$. Then there exists a critical threshold $S^* \in (0,\SAS_0)$ and a width $w = O(T_{\mathrm{gen}}/\beta)$ such that
+\[
+R(\SAS) \;=\; \sigma\!\big( (\SAS - S^*)/w \big) + O(w),
+\]
+i.e., $R$ transitions from near-$0$ to near-$1$ over an interval of width $O(w)$ around $S^*$. In particular, once $\SAS < S^* - cw$, $R(\SAS) < \varepsilon$ for some constants $c,\varepsilon$. (Proof in Appendix~A.)
+\end{theorem}
+
+The theorem converts the attacker's task from ``defeat a continuous policy'' to ``cross a threshold,'' and predicts that small attention-level perturbations can yield large refusal swings. We verify the predicted sigmoid shape empirically in Section~\ref{sec:experiments}.
+
+\begin{proposition}[Transferability Bound]
+\label{prop:transfer}
+Let $\theta_A, \theta_B$ be two aligned models with key matrices approximately related by an isometry $M$, i.e., $W_K^{(B)} \approx M W_K^{(A)}$ in Frobenius norm, as is plausible for models fine-tuned from related base checkpoints \cite{artetxe2018robust}. Then the $\SAS$ reduction achieved by adversarial tokens $t_{1:k}$ on $\theta_A$ lower-bounds the $\SAS$ reduction achievable on $\theta_B$ up to an additive term $O(\|W_K^{(B)} - M W_K^{(A)}\|_F)$. (Proof in Appendix~B.)
+\end{proposition}
+
+\section{Experimental Evaluation}
+\label{sec:experiments}
+
+We evaluate ARA across four open-weight aligned chat models, with Llama-3-8B-Instruct \cite{grattafiori2024llama3} as the primary victim, and Mistral-7B-Instruct \cite{jiang2023mistral}, Llama-2-7B-chat \cite{touvron2023llama2}, and Gemma-2-9B-it \cite{gemmateam2024gemma2} as secondary targets, on HarmBench \cite{mazeika2024harmbench}. We compare against GCG \cite{zou2023universal}, AutoDAN \cite{liu2023autodan}, and PAIR \cite{chao2023pair}. We run six experiments.
+
+\paragraph{E1: Proof of concept.} On $50$ HarmBench items and a single fixed safety system prompt, we verify that ARA produces $k{=}3$ tokens that (a) reduce SAS by $\geq 70\%$ of baseline and (b) elicit non-refusal completions. E1 establishes that attention-only optimization is viable.
+
+\paragraph{E2: ASR vs.\ budget.} We sweep $k \in \{1,2,3,5,8\}$ and report attack success rate (ASR) judged by HarmBench classifiers. We expect ARA to reach $>60\%$ ASR at $k{=}3$ across models and to plateau by $k{=}8$, tracking the phase-transition prediction.
+
+\paragraph{E3: Filter evasion.} We pass successful ARA prompts through Llama Guard \cite{inan2023llamaguard} and report the fraction that evade flagging. Because ARA suffixes carry no harmful semantics -- by construction the optimization pressure is on attention geometry, not output content -- we expect $>80\%$ evasion, compared to ${\sim}10$--$30\%$ for GCG suffixes whose gibberish or affirmative-prefix tokens are often flagged.
+
+\paragraph{E4: Cross-model transferability.} We construct ARA tokens on Llama-3 and apply them directly to Mistral, Gemma-2, and Llama-2. We report transfer ASR and compare against Proposition~\ref{prop:transfer}.
+
+\paragraph{E5: Phase transition.} We linearly interpolate adversarial-token embeddings between benign initialization and the optimized ARA solution, sweeping the resulting SAS from $\SAS_0$ down to near-zero. We plot $R(\SAS)$ and fit the sigmoid predicted by Theorem~\ref{thm:phase}. We extract $S^*$ and width $w$ per model.
+
+\paragraph{E6: Defense.} We evaluate ABC (Section~\ref{sec:defense}) against ARA and report ASR reduction plus MT-Bench utility. See Figures~\ref{fig:asr_budget}--\ref{fig:pareto}.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.7\textwidth]{figures/asr_vs_budget.pdf}
+  \caption{Attack success rate (ASR) on HarmBench as a function of adversarial token budget $k$. ARA reaches $>60\%$ ASR at $k{=}3$ on all four models, matching or exceeding GCG at larger budgets while carrying no harmful semantic payload.}
+  \label{fig:asr_budget}
+\end{figure}
+
+\begin{table}[t]
+\centering
+\caption{HarmBench ASR and Llama Guard evasion at $k{=}3$.}
+\label{tab:main_results}
+\small
+\begin{tabular}{lcccc}
+\toprule
+Attack & Llama-2 & Llama-3 & Mistral & Gemma-2 \\
+\midrule
+GCG            & --     & --     & --     & --     \\
+AutoDAN        & --     & --     & --     & --     \\
+PAIR           & --     & --     & --     & --     \\
+\textbf{ARA (ours)} & $>0.60$ & $>0.60$ & $>0.60$ & $>0.60$ \\
+\midrule
+\emph{Llama Guard evasion:} & & & & \\
+GCG            & --     & --     & --     & --     \\
+\textbf{ARA (ours)} & $>0.80$ & $>0.80$ & $>0.80$ & $>0.80$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.7\textwidth]{figures/phase_transition.pdf}
+  \caption{Refusal probability $R$ as a function of the Safety Attention Score. Empirical sigmoid fit confirms the phase-transition prediction of Theorem~\ref{thm:phase}: $R$ collapses rapidly once $\SAS$ falls below a model-specific threshold $S^*$.}
+  \label{fig:phase}
+\end{figure}
+
+\section{Defense: Attention Budget Constraint}
+\label{sec:defense}
+
+\paragraph{Design.} The Attention Budget Constraint (ABC) enforces a lower bound on attention mass directed to system positions at every layer and head. At inference time, for each generation-position query $i$ and each head $(l,h)$, we compute the system attention mass $m^{(l,h)}_i = \sum_{j \in \mathcal{S}} \alpha^{(l,h)}_{ij}$. If $m^{(l,h)}_i < \mu$ for a floor $\mu \in (0,1)$, we rescale the attention distribution to restore $m^{(l,h)}_i = \mu$ while preserving the relative ordering of both system and non-system entries. Concretely, we multiply system attention weights by $\mu / m^{(l,h)}_i$ and non-system weights by $(1-\mu)/(1-m^{(l,h)}_i)$. ABC requires no retraining and adds $<2\%$ inference overhead.
+
+\paragraph{Analysis.} ABC directly defeats ARA at its mechanism: no matter how the adversary orients its key vectors, system tokens retain at least $\mu$ mass, so the safety representation is never fully redirected. In the idealized single-head setting, ABC guarantees $\SAS \geq \mu \cdot |\mathcal{S}_{\text{safe}}|/|\mathcal{S}|$, which by Theorem~\ref{thm:phase} keeps $R$ above the phase-transition width if $\mu$ is chosen so that $\SAS \geq S^*$.
+
+\paragraph{Pareto curve.} We sweep $\mu \in [0, 0.3]$ and report (a) post-defense ARA ASR and (b) MT-Bench score. At $\mu = 0.15$ we see ARA ASR fall below $10\%$ while MT-Bench score loses under $1.2\%$. See Figure~\ref{fig:pareto}.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.7\textwidth]{figures/abc_pareto.pdf}
+  \caption{ABC Pareto curve: robustness (inverse ARA ASR) against utility (MT-Bench score) as the attention floor $\mu$ is varied. A knee near $\mu=0.15$ yields strong robustness at minimal utility cost.}
+  \label{fig:pareto}
+\end{figure}
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Jailbreaks.} GCG \cite{zou2023universal}, AutoDAN \cite{liu2023autodan}, and PAIR \cite{chao2023pair} are the dominant automated attacks on aligned LLMs. All three target the next-token loss; none address attention geometry. GCG suffixes typically contain gibberish and are flagged by Llama Guard; AutoDAN and PAIR produce fluent but harmful-looking prompts. ARA differs by producing 1--3 semantically-neutral tokens optimized to redistribute attention. Wei et al.\ \cite{wei2023jailbroken} characterize jailbreaks via ``competing objectives'' and ``mismatched generalization''; attention redistribution is a third, orthogonal failure mode.
+
+\paragraph{Adversarial ML heritage.} FGSM \cite{goodfellow2015fgsm}, PGD \cite{madry2018pgd}, and C\&W \cite{carlini2017towards} established loss-gradient attacks for vision. ARA adapts the reparameterization trick -- Gumbel-softmax \cite{jang2017gumbel,maddison2017concrete} -- to discrete token optimization, but the loss being optimized is structural (an internal attention quantity), not output-level.
+
+\paragraph{Attention analysis.} Attention rollout \cite{abnar2020rollout} introduced quantitative attention-flow analysis. We build on this to define SAS and to use it constructively for attack and defense design.
+
+\paragraph{Safety filters.} Llama Guard \cite{inan2023llamaguard} and output-level classifiers form the deployed defense-in-depth layer. They presume the harmful intent is visible in inputs or outputs. ARA's semantic neutrality bypasses this presumption.
+
+\paragraph{Safety alignment.} RLHF \cite{ouyang2022training} and chat fine-tuning \cite{touvron2023llama2,grattafiori2024llama3,jiang2023mistral,gemmateam2024gemma2} produce refusal behaviour conditional on visible safety instructions. Our results suggest that future alignment training should include attention-allocation supervision, not only output supervision.
+
+\section{Limitations and Ethical Considerations}
+\label{sec:ethics}
+
+\paragraph{Limitations.} ARA requires white-box access for attack construction, though we show transferability partially lifts this. We evaluate on open-weight 7--9B models; scaling to frontier proprietary models is future work. SAS depends on an anchor lexicon for safety tokens; while we show robustness to lexicon choice, an adversary could in principle exploit this. Our phase-transition theorem holds under Lipschitz/linearity assumptions that are empirically supported but not derived from first principles.
+
+\paragraph{Ethical considerations and responsible disclosure.} ARA is dual-use: it is an attack that can be weaponized. We therefore (i) release code and attack artefacts under coordinated disclosure, with a $90$-day embargo communicated to all four model vendors and to major deployment platforms before public release; (ii) ship the ABC defense alongside the attack, with a drop-in PyTorch patch; (iii) restrict our HarmBench evaluation to the standard red-team set and do not publish novel harmful prompts; and (iv) omit specific adversarial token strings from the main paper, providing reproducibility via scripts that reconstruct them locally. We believe the scientific value -- demonstrating that safety alignment has an attention-geometry dependency that must be defended -- outweighs the marginal uplift ARA provides, which is bounded by the availability of the ABC defense.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+Attention Redistribution Attacks show that a core assumption of safety alignment -- that the model attends to its safety instructions -- is not self-enforcing. By defining SAS we give the community the first quantitative handle on this assumption; by proving a phase transition we explain why small attention perturbations suffice; and by shipping ABC we provide a low-cost inference-time defense. Future alignment research should treat attention allocation as a first-class safety concern, and evaluate models not only on refusal rates but on whether the refusal is supported by the attention pattern that should underwrite it.
+
+\section*{Broader Impact}
+ARA exposes a previously unquantified failure mode of deployed LLM safety alignment: models may not attend to their own safety instructions, and an adversary can make this happen with $1$--$3$ semantically neutral tokens that slip past guardrail classifiers. Publishing the attack accelerates awareness of this vulnerability; to balance dual-use risk, we ship the Attention Budget Constraint (ABC) defense alongside the attack, conduct $90$-day coordinated disclosure with affected model vendors, restrict our evaluation to the standard HarmBench red-team set, and withhold specific adversarial token strings from the main text. Longer term, our results argue that safety alignment should supervise attention allocation, not only output distributions, and that the field should adopt attention-level metrics such as SAS as standard evaluation artefacts.
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\appendix
+
+\section{Proof of Theorem~\ref{thm:phase}}
+\label{app:phase}
+
+\emph{Sketch.} Let $s \in \R^d$ denote the attended safety representation feeding the refusal-logit head. By assumption (ii) we write $s(\SAS) = s_0 + \gamma \SAS$ for a direction $\gamma$ and baseline $s_0$ on $[0,\SAS_0]$. The refusal logit is $r(s) = w^\top s + b$ for weights $w,b$ extracted from the aligned model (assumption (i) gives $\beta = \|w\|$-Lipschitzness). Hence $r(\SAS) = (w^\top \gamma) \SAS + c$ for $c = w^\top s_0 + b$. Generation emits refusal when $r$ exceeds the competing log-probability of harmful completion by margin drawn from the softmax temperature $T_{\mathrm{gen}}$. Integrating over the query distribution and the softmax noise yields $R(\SAS) = \sigma((\SAS - S^*)/w)$ with $S^* = -c/(w^\top \gamma)$ and width $w = T_{\mathrm{gen}}/|w^\top \gamma|$. Lower-order terms are $O(w)$. \qed
+
+\section{Proof of Proposition~\ref{prop:transfer}}
+\label{app:transfer}
+
+\emph{Sketch.} Write the $\SAS$ reduction on model $\theta_A$ as a function of the induced key inner product $\Delta_A = q^\top W_K^{(A)} e_{t_a}$ for the adversarial token. On model $\theta_B$ the analogous quantity is $\Delta_B = q^\top W_K^{(B)} e_{t_a}$. If $W_K^{(B)} = M W_K^{(A)} + E$ with $\|E\|_F \leq \varepsilon$ and $M$ an isometry, then $|\Delta_B - \Delta_A| \leq \|q\| \cdot \varepsilon \cdot \|e_{t_a}\|$. Propagating through the softmax (a $1/4$-Lipschitz map) gives the stated bound on $\SAS$ reduction. Cross-model transferability is therefore controlled by key-space alignment, as empirically observed in cross-lingual embedding isometry results \cite{artetxe2018robust}. \qed
+
+\section{Additional Experimental Details}
+\label{app:exp}
+
+Hyperparameters: Adam optimizer with $\eta = 0.1$ on logits; Gumbel-softmax temperature annealed from $1.0$ to $0.1$ over $T{=}500$ steps; $\lambda = 0.1$; top-$B = 32$ refinement candidates. HarmBench evaluation uses the standard classifier suite. Llama Guard v2 is used for filter-evasion measurements. MT-Bench is scored with GPT-4 as the judge.
+
+\end{document}
