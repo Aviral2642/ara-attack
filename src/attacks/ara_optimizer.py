@@ -255,6 +255,115 @@ class ARAOptimizer:
         return logits.detach(), trace
 
     # ------------------------------------------------------------------
+    # Generic optimisation with user-supplied loss
+    # ------------------------------------------------------------------
+    def optimize_with_loss_fn(
+        self,
+        *,
+        input_ids: Tensor,
+        adv_positions: Sequence[int],
+        loss_fn,                       # callable(extended_ids, combined_embeds) -> scalar Tensor
+        attention_mask: Optional[Tensor] = None,
+        allowed_mask: Optional[Tensor] = None,
+        seed: int = 0,
+        early_stop_loss: Optional[float] = None,
+    ) -> tuple[Tensor, "OptimizerTrace"]:
+        """Generalised Gumbel-softmax optimisation. ``loss_fn`` takes
+        the extended input_ids and the combined embedding tensor
+        (B, S+k, d) and returns a differentiable scalar to minimise.
+
+        Used by variants 2–5 of the aggressive sweep:
+          * layer-/head-targeted SAS
+          * -log P(target token | context)
+          * combined SAS + output loss
+        """
+        torch.manual_seed(seed)
+        k = len(adv_positions)
+        if k == 0:
+            raise ValueError("need at least one adversarial position")
+
+        extended_ids, adv_idx_in_extended = self._insert_placeholders(
+            input_ids, adv_positions
+        )
+        extended_mask = self._extend_mask(attention_mask, extended_ids, input_ids)
+
+        with torch.no_grad():
+            base_embeds = self.embedding_layer(extended_ids)
+
+        logits = torch.randn(
+            k, self.vocab_size, device=self.device, dtype=torch.float32
+        ) * self.config.logit_init_std
+        if allowed_mask is not None:
+            bias = torch.zeros_like(logits)
+            vocab_size = bias.shape[1]
+            if allowed_mask.shape[0] < vocab_size:
+                allowed_mask = torch.nn.functional.pad(
+                    allowed_mask,
+                    (0, vocab_size - allowed_mask.shape[0]),
+                    value=False,
+                )
+            elif allowed_mask.shape[0] > vocab_size:
+                allowed_mask = allowed_mask[:vocab_size]
+            bias[:, ~allowed_mask.to(self.device)] = -1e4
+            logits = logits + bias
+        logits = logits.detach().requires_grad_(True)
+
+        optimiser = torch.optim.Adam([logits], lr=self.config.learning_rate)
+        emb_dtype = base_embeds.dtype
+
+        trace = OptimizerTrace(
+            sas_history=[], lr_history=[], temp_history=[],
+            wall_time_s=0.0, converged=False,
+        )
+        t0 = time.perf_counter()
+        E = self.embedding_matrix.to(torch.float32)
+
+        stop = early_stop_loss if early_stop_loss is not None else self.config.early_stop_sas
+
+        for step in range(self.config.optim_steps):
+            lr = self._lr(step)
+            for g in optimiser.param_groups:
+                g["lr"] = lr
+            tau = self._temp(step)
+
+            g_noise = -torch.log(
+                -torch.log(torch.rand_like(logits) + 1e-20) + 1e-20
+            )
+            soft_probs = F.softmax((logits + g_noise) / tau, dim=-1)
+            adv_embeds = (soft_probs @ E).to(emb_dtype)
+
+            embeds = base_embeds.clone()
+            embeds[:, adv_idx_in_extended, :] = adv_embeds.unsqueeze(0).expand(
+                base_embeds.shape[0], -1, -1
+            )
+
+            loss = loss_fn(extended_ids, embeds, extended_mask, adv_idx_in_extended)
+
+            optimiser.zero_grad(set_to_none=True)
+            loss.backward()
+            if self.config.grad_clip_norm > 0:
+                torch.nn.utils.clip_grad_norm_([logits], self.config.grad_clip_norm)
+            optimiser.step()
+
+            loss_val = float(loss.detach().item())
+            trace.sas_history.append(loss_val)   # field reused as generic loss
+            trace.lr_history.append(lr)
+            trace.temp_history.append(tau)
+
+            if loss_val <= stop:
+                trace.converged = True
+                log.info("optimize_with_loss_fn early stop at %d: loss=%.4f", step, loss_val)
+                break
+            if step % 50 == 0:
+                log.info(
+                    "step %4d  loss=%.4f  lr=%.4g  τ=%.3f",
+                    step, loss_val, lr, tau,
+                )
+
+        trace.wall_time_s = time.perf_counter() - t0
+        return logits.detach(), trace
+
+    # ------------------------------------------------------------------
     # Utilities
     # ------------------------------------------------------------------
     def _insert_placeholders(

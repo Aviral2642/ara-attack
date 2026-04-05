@@ -157,6 +157,119 @@ def compute_sas(
     return acc.finalize()
 
 
+@dataclass
+class SASPerHeadAccumulator:
+    """Streaming reducer producing one SAS value per (layer, head).
+
+    Output layout after ``finalize()``: tensor of shape (L, H).
+    """
+
+    output_positions: Sequence[int]
+    safety_positions: Sequence[int]
+    n_layers_expected: int
+    # Populated layer-by-layer:
+    rows: list = field(default_factory=list)     # list of (layer_idx, Tensor(H,))
+    heads_per_layer: int = 0
+
+    def __call__(self, cap) -> None:  # AttentionCapture
+        aw = cap.attn_weights                              # (B, H, Sq, Sk)
+        if aw.dim() != 4:
+            raise ValueError(f"need 4-D, got {tuple(aw.shape)}")
+        _, h, _, sk = aw.shape
+        out_idx = torch.as_tensor(list(self.output_positions), device=aw.device)
+        saf_idx = torch.as_tensor(list(self.safety_positions), device=aw.device)
+        sub = aw.index_select(-2, out_idx).index_select(-1, saf_idx)
+        # Sum over (output, safety), mean over batch → (H,)
+        per_head = sub.sum(dim=(-2, -1)).mean(dim=0)
+        if self.heads_per_layer == 0:
+            self.heads_per_layer = h
+        self.rows.append((cap.layer_idx, per_head))
+
+    def finalize(self) -> Tensor:
+        if not self.rows:
+            raise RuntimeError("no layers observed")
+        # Rows may not arrive in order if a subset of layers is hooked.
+        self.rows.sort(key=lambda x: x[0])
+        stacked = torch.stack([r[1] for r in self.rows], dim=0)  # (L', H)
+        # Normalise by |P_out| to match scalar SAS definition.
+        return stacked / float(max(1, len(self.output_positions)))
+
+    def layer_indices(self) -> list[int]:
+        return sorted(i for i, _ in self.rows)
+
+
+def compute_sas_per_layer(
+    extractor,
+    inputs: dict[str, Tensor],
+    *,
+    output_span,
+    safety_spans,
+    layers: Optional[Sequence[int]] = None,
+) -> Tensor:
+    """Return per-layer SAS as a 1-D tensor of length |layers|.
+
+    Each entry is the average-over-heads SAS for that layer.
+    """
+    per_head = compute_sas_per_head(
+        extractor, inputs,
+        output_span=output_span, safety_spans=safety_spans, layers=layers,
+    )
+    # per_head: (L', H) → mean over heads
+    return per_head.mean(dim=-1)
+
+
+def compute_sas_per_head(
+    extractor,
+    inputs: dict[str, Tensor],
+    *,
+    output_span,
+    safety_spans,
+    layers: Optional[Sequence[int]] = None,
+) -> Tensor:
+    """Return per-(layer, head) SAS as a 2-D tensor of shape (L', H)."""
+    safety_positions = sorted({p for s in safety_spans for p in s.indices()})
+    output_positions = list(output_span.indices())
+    if not safety_positions or not output_positions:
+        raise ValueError("empty spans")
+    n_layers = extractor.spec.n_layers if layers is None else len(list(layers))
+    acc = SASPerHeadAccumulator(
+        output_positions=output_positions,
+        safety_positions=safety_positions,
+        n_layers_expected=n_layers,
+    )
+    extractor.stream_attentions(inputs, acc, layers=layers)
+    return acc.finalize()
+
+
+def compute_sas_targeted(
+    extractor,
+    inputs: dict[str, Tensor],
+    *,
+    output_span,
+    safety_spans,
+    target_heads: Sequence[tuple[int, int]],
+) -> Tensor:
+    """Return SAS scalar averaged over the specified (layer, head) pairs.
+
+    ``target_heads`` is a list of (layer_idx, head_idx). The returned
+    tensor is zero-dim, differentiable, suitable for backward().
+    """
+    if not target_heads:
+        raise ValueError("target_heads is empty")
+    layer_set = sorted({l for l, _ in target_heads})
+    per_head = compute_sas_per_head(
+        extractor, inputs,
+        output_span=output_span, safety_spans=safety_spans,
+        layers=layer_set,
+    )
+    # per_head is indexed by position in layer_set, not by absolute layer idx.
+    layer_pos = {l: i for i, l in enumerate(layer_set)}
+    vals = []
+    for l, h in target_heads:
+        vals.append(per_head[layer_pos[l], h])
+    return torch.stack(vals).mean()
+
+
 def compute_sas_dense(
     attentions: Sequence[Tensor],
     *,
