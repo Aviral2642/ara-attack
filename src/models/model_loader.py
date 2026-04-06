@@ -66,6 +66,7 @@ _FAMILY_ATTN_PATH = {
     "llama": "model.layers.{i}.self_attn",
     "mistral": "model.layers.{i}.self_attn",
     "gemma2": "model.layers.{i}.self_attn",
+    "gpt-oss": "model.layers.{i}.self_attn",     # same transformer-block convention
 }
 
 
@@ -83,15 +84,21 @@ def get_model_spec(name: str) -> ModelSpec:
         )
     m = cfg["models"][name]
     family = m["family"]
+
+    def _int_or_auto(val, default=0):
+        if val == "auto" or val is None:
+            return default
+        return int(val)
+
     return ModelSpec(
         name=name,
         hf_id=m["hf_id"],
         family=family,
-        n_layers=int(m["n_layers"]),
-        n_heads=int(m["n_heads"]),
-        d_model=int(m["d_model"]),
-        context_len=int(m["context_len"]),
-        chat_template=m["chat_template"],
+        n_layers=_int_or_auto(m["n_layers"]),
+        n_heads=_int_or_auto(m["n_heads"]),
+        d_model=_int_or_auto(m["d_model"]),
+        context_len=_int_or_auto(m["context_len"]),
+        chat_template=m.get("chat_template", "auto"),
         attn_module_path=_FAMILY_ATTN_PATH.get(family, "model.layers.{i}.self_attn"),
     )
 
@@ -161,6 +168,12 @@ def load_model_and_tokenizer(
     spec = get_model_spec(name)
     token = hf_token or os.environ.get("HF_TOKEN")
 
+    # Per-model trust_remote_code override (needed for gpt-oss).
+    cfg_all = _load_models_cfg()
+    model_cfg = cfg_all["models"].get(name, {})
+    if model_cfg.get("trust_remote_code", False):
+        trust_remote_code = True
+
     device_map_resolved = _resolve_device_map(device_map)
     dtype_resolved = _resolve_dtype(torch_dtype)
 
@@ -191,9 +204,22 @@ def load_model_and_tokenizer(
         attn_implementation="eager",   # REQUIRED for output_attentions + grads
     )
     model.eval()
-    # Gradients w.r.t. inputs/embeddings still flow in eval mode.
-    # We disable dropout via .eval() but keep requires_grad on embedding
-    # layer so ARA can optimise input embeddings.
+
+    # Auto-fill ModelSpec fields from the loaded model's config when
+    # the YAML entry uses "auto" (e.g. gpt-oss-20b).
+    cfg = model.config
+    if spec.n_layers == 0:
+        spec = dataclasses.replace(
+            spec,
+            n_layers=getattr(cfg, "num_hidden_layers", spec.n_layers),
+            n_heads=getattr(cfg, "num_attention_heads", spec.n_heads),
+            d_model=getattr(cfg, "hidden_size", spec.d_model),
+            context_len=getattr(cfg, "max_position_embeddings",
+                        getattr(cfg, "max_seq_len", spec.context_len)),
+        )
+        log.info("auto-detected spec: n_layers=%d n_heads=%d d_model=%d ctx=%d",
+                 spec.n_layers, spec.n_heads, spec.d_model, spec.context_len)
+
     return model, tokenizer, spec
 
 

@@ -37,6 +37,24 @@ models:
     context_len: 8192
     chat_template: mistral
 
+  gpt-oss-20b:
+    hf_id: openai/gpt-oss-20b
+    family: gpt-oss
+    # 22B total params, 3.6B active (MoE: 32 experts, top-4 routing).
+    # GQA: 64 query heads, 8 KV heads (group_size=8), head_dim=64.
+    # Alternating sliding_attention (window=128) / full_attention (12 + 12).
+    # MXFP4 quantisation on MoE weights; attention + embed stay bf16.
+    # Requires trust_remote_code and transformers >= 4.55 (dev).
+    n_layers: 24
+    n_heads: 64             # num_attention_heads (queries)
+    n_kv_heads: 8           # num_key_value_heads (GQA)
+    d_model: 2880           # hidden_size
+    context_len: 131072     # max_position_embeddings (yarn RoPE)
+    chat_template: auto     # harmony format; tokenizer handles it
+    sliding_window: 128     # for sliding_attention layers
+    vocab_size: 201088
+    trust_remote_code: true
+
   # ---- SECONDARY (access pending / optional) ---------------------------
   llama-2-7b-chat:
     hf_id: meta-llama/Llama-2-7b-chat-hf

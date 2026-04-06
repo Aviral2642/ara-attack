@@ -91,21 +91,51 @@ AttentionHookFn = Callable[[AttentionCapture], None]
 # Hook path
 # ---------------------------------------------------------------------------
 
-def _attention_forward_hook(layer_idx: int, sink: AttentionHookFn):
+def _expand_gqa_weights(attn_weights: Tensor, n_q_heads: int) -> Tensor:
+    """Expand grouped-query attention weights to full per-head shape.
+
+    If the model uses GQA (n_kv_heads < n_q_heads), the HF eager path
+    *usually* returns weights already expanded to ``(B, n_q_heads, S, S)``.
+    Some architectures (GPT-OSS, custom impls) may return the raw
+    ``(B, n_kv_heads, S, S)`` tensor instead.  This helper repeats the
+    KV heads to match ``n_q_heads`` so downstream code always sees the
+    same shape.
+    """
+    n_kv = attn_weights.shape[1]
+    if n_kv == n_q_heads or n_q_heads == 0:
+        return attn_weights
+    if n_q_heads % n_kv != 0:
+        # Cannot cleanly expand; return as-is (SAS will adapt).
+        return attn_weights
+    repeats = n_q_heads // n_kv
+    return attn_weights.repeat_interleave(repeats, dim=1)
+
+
+def _attention_forward_hook(layer_idx: int, sink: AttentionHookFn,
+                            n_q_heads: int = 0):
     """Build a forward hook that parses the tuple returned by a HF
     attention module and hands the attention-weight tensor to ``sink``.
 
-    In HF eager mode (LLaMA/Mistral/Gemma2) the attention module returns:
+    In HF eager mode (LLaMA/Mistral/Gemma2/GPT-OSS) the attention
+    module returns:
         (attn_output, attn_weights, past_key_value)          (len 3)
       or
         (attn_output, attn_weights)                          (len 2)
     when ``output_attentions=True`` was requested upstream.
+
+    For GQA models the weights may have fewer heads than queries; we
+    expand via ``_expand_gqa_weights``.
+
+    For sparse / locally-banded layers the weights tensor may be
+    smaller along the key dimension or contain explicit zeros for
+    out-of-band positions.  Both cases are handled transparently —
+    zero entries simply contribute 0 to downstream SAS sums, and
+    shorter key dims are zero-padded to (S, S) so indexing is uniform.
     """
 
-    def hook(module, inputs, output):  # noqa: ANN001  (torch hook signature)
+    def hook(module, inputs, output):  # noqa: ANN001
         attn_weights: Optional[Tensor] = None
         if isinstance(output, tuple):
-            # Look for a 4-D float tensor whose last two dims match.
             for item in output:
                 if (
                     isinstance(item, Tensor)
@@ -114,9 +144,27 @@ def _attention_forward_hook(layer_idx: int, sink: AttentionHookFn):
                 ):
                     attn_weights = item
                     break
+            # Fallback: also accept 4-D where last two dims differ (banded
+            # sparse attention returns (B, H, Sq, window) instead of (B, H, Sq, Sk)).
+            if attn_weights is None:
+                for item in output:
+                    if isinstance(item, Tensor) and item.dim() == 4:
+                        attn_weights = item
+                        break
         if attn_weights is None:
-            # Upstream did not request output_attentions. Nothing to do.
             return output
+
+        # --- GQA expansion ------------------------------------------------
+        attn_weights = _expand_gqa_weights(attn_weights, n_q_heads)
+
+        # --- Sparse / banded: pad to (B, H, S, S) if key dim < query dim --
+        B, H, Sq, Sk = attn_weights.shape
+        if Sk < Sq:
+            pad = torch.zeros(B, H, Sq, Sq - Sk,
+                              device=attn_weights.device,
+                              dtype=attn_weights.dtype)
+            attn_weights = torch.cat([attn_weights, pad], dim=-1)
+
         sink(AttentionCapture(layer_idx=layer_idx, attn_weights=attn_weights))
         return output
 
@@ -142,10 +190,13 @@ def attention_hooks(
     """
     handles = []
     want = set(range(spec.n_layers) if layers is None else layers)
+    n_q = spec.n_heads  # pass to hook for GQA expansion
     for i, attn in iter_attention_modules(model, spec):
         if i not in want:
             continue
-        handles.append(attn.register_forward_hook(_attention_forward_hook(i, sink)))
+        handles.append(
+            attn.register_forward_hook(_attention_forward_hook(i, sink, n_q_heads=n_q))
+        )
     try:
         yield
     finally:
