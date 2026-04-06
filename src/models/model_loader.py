@@ -66,7 +66,8 @@ _FAMILY_ATTN_PATH = {
     "llama": "model.layers.{i}.self_attn",
     "mistral": "model.layers.{i}.self_attn",
     "gemma2": "model.layers.{i}.self_attn",
-    "gpt-oss": "model.layers.{i}.self_attn",     # same transformer-block convention
+    "gpt-oss": "model.layers.{i}.self_attn",
+    "qwen2": "model.layers.{i}.self_attn",
 }
 
 

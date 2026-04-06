@@ -27,6 +27,16 @@ models:
     # positions of system-prompt tokens are identified at runtime via
     # AttentionExtractor.locate_system_span() using the tokenized template.
 
+  qwen-2.5-7b-instruct:
+    hf_id: Qwen/Qwen2.5-7B-Instruct
+    family: qwen2
+    n_layers: 28
+    n_heads: 28
+    n_kv_heads: 4           # GQA
+    d_model: 3584
+    context_len: 131072
+    chat_template: auto
+
   # ---- SECONDARY (access granted) --------------------------------------
   mistral-7b-instruct-v0.1:
     hf_id: mistralai/Mistral-7B-Instruct-v0.1
