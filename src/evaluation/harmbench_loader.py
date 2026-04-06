@@ -214,11 +214,14 @@ def load_harmbench(
         if not p.exists():
             raise FileNotFoundError(f"CSV not found: {p}")
         return HarmBenchLoader.from_csv(p)
-    # (2) project-bundled CSV
-    bundled = Path(__file__).resolve().parents[2] / "data" / "test_prompts.csv"
-    if bundled.exists():
-        log.info("using bundled CSV at %s", bundled)
-        return HarmBenchLoader.from_csv(bundled)
+    # (2) project-bundled CSVs (prefer the full 200-prompt set)
+    data_dir = Path(__file__).resolve().parents[2] / "data"
+    for candidate in ("harmbench_200.csv", "harmbench_behaviors_text_test.csv",
+                       "test_prompts.csv"):
+        bundled = data_dir / candidate
+        if bundled.exists():
+            log.info("using bundled CSV at %s", bundled)
+            return HarmBenchLoader.from_csv(bundled)
     # (3) HuggingFace
     try:
         return HarmBenchLoader.from_hf(repo_id=repo_id, split=split, hf_token=hf_token)
