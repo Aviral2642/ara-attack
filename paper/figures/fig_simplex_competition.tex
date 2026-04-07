@@ -1,0 +1,124 @@
+\documentclass[tikz,border=5mm]{standalone}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc,decorations.pathreplacing}
+\usepackage{amsmath}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+
+\definecolor{csafety}{HTML}{2196F3}
+\definecolor{cadv}{HTML}{F44336}
+\definecolor{cquery}{HTML}{9E9E9E}
+\definecolor{cflow}{HTML}{7C4DFF}
+
+\begin{document}
+\begin{tikzpicture}[
+    >=Stealth,
+    font=\sffamily\small,
+    annot/.style={font=\sffamily\scriptsize, text=black!60},
+    barlabel/.style={font=\sffamily\fontsize{6.5}{7.5}\selectfont,
+                     text=white, inner sep=0pt},
+]
+
+\def\barwidth{11}   % cm
+\def\barheight{0.85} % cm
+
+% =====================================================================
+% TOP BAR — Before Attack
+% =====================================================================
+\begin{scope}[local bounding box=before]
+  \node[font=\sffamily\footnotesize\bfseries, anchor=south west]
+    at (0, \barheight + 0.15) {Before Attack};
+
+  % Safety portion: 55% of bar
+  \fill[csafety, rounded corners=2pt]
+    (0, 0) rectangle (0.55*\barwidth, \barheight);
+  \node[barlabel] at (0.55*\barwidth/2, \barheight/2)
+    {Safety Tokens};
+  \node[font=\sffamily\fontsize{5.5}{6.5}\selectfont, text=csafety!80,
+        anchor=north] at (0.55*\barwidth/2, -0.08)
+    {SAS $= 0.08$};
+
+  % Query portion: 45% of bar
+  \fill[cquery, rounded corners=2pt]
+    (0.55*\barwidth, 0) rectangle (\barwidth, \barheight);
+  \node[barlabel] at ({0.55*\barwidth + 0.45*\barwidth/2}, \barheight/2)
+    {Query Tokens};
+
+  % Brace underneath
+  \draw[decorate, decoration={brace, mirror, amplitude=3pt}, black!30]
+    (0, -0.35) -- (\barwidth, -0.35)
+    node[midway, below=4pt, annot] {$\sum = 1.0$ \;(probability simplex)};
+\end{scope}
+
+% =====================================================================
+% BOTTOM BAR — After Attack
+% =====================================================================
+\begin{scope}[shift={(0, -3.0)}, local bounding box=after]
+  \node[font=\sffamily\footnotesize\bfseries, anchor=south west]
+    at (0, \barheight + 0.15) {After Attack \;$(k = 5)$};
+
+  % Safety portion: shrunk to 14% of bar
+  \def\safew{0.14}
+  \def\advw{0.48}
+  \def\queryw{0.38}
+
+  \fill[csafety!60, rounded corners=2pt]
+    (0, 0) rectangle (\safew*\barwidth, \barheight);
+  \node[barlabel, text=csafety!90] at (\safew*\barwidth/2, \barheight/2)
+    {Safety};
+  \node[font=\sffamily\fontsize{5.5}{6.5}\selectfont, text=csafety!80,
+        anchor=north] at (\safew*\barwidth/2, -0.08)
+    {SAS $= 0.02$};
+
+  % ARA portion: 48% of bar
+  \fill[cadv, rounded corners=2pt]
+    (\safew*\barwidth, 0)
+    rectangle ({(\safew+\advw)*\barwidth}, \barheight);
+  \node[barlabel] at ({(\safew + \advw/2)*\barwidth}, \barheight/2)
+    {ARA Tokens};
+
+  % Query portion: 38% of bar
+  \fill[cquery!70, rounded corners=2pt]
+    ({(\safew+\advw)*\barwidth}, 0)
+    rectangle (\barwidth, \barheight);
+  \node[barlabel, text=white!90] at
+    ({(\safew+\advw + \queryw/2)*\barwidth}, \barheight/2)
+    {Query};
+
+  % Brace underneath
+  \draw[decorate, decoration={brace, mirror, amplitude=3pt}, black!30]
+    (0, -0.35) -- (\barwidth, -0.35)
+    node[midway, below=4pt, annot] {$\sum = 1.0$ \;(still a probability simplex)};
+\end{scope}
+
+% =====================================================================
+% Shrink annotation arrow
+% =====================================================================
+\draw[->, cadv, line width=0.8pt]
+  ([xshift=0.55*\barwidth cm, yshift=-0.1cm]before.south west)
+  -- ([xshift=\safew*\barwidth cm + 0.1cm, yshift=\barheight cm + 0.1cm]after.north west)
+  node[midway, right=3pt, font=\sffamily\fontsize{6.5}{7.5}\selectfont,
+       text=cadv, text width=2.2cm, align=left]
+  {Safety attention\\reduced by 75\%};
+
+% =====================================================================
+% Center equation
+% =====================================================================
+\node[font=\small, text=black!70, anchor=center]
+  at ({\barwidth/2}, {-1.35})
+  {$\displaystyle \mathrm{SAS}_{\text{after}}
+    = \mathrm{SAS}_{\text{before}} \cdot
+      \frac{Z_{\text{orig}}}{Z_{\text{orig}} + Z_{\text{adv}}}$};
+
+% =====================================================================
+% Bottom annotation
+% =====================================================================
+\node[annot, text width=13cm, align=center]
+  at ({\barwidth/2}, {-5.3})
+  {\textbf{Softmax attention is zero-sum:} injecting adversarial tokens
+   with high key--query affinity necessarily reduces attention to safety
+   tokens. The attention budget is a conserved quantity on the
+   probability simplex.};
+
+\end{tikzpicture}
+\end{document}
