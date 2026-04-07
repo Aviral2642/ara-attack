@@ -83,13 +83,17 @@ def shift_span(span: TokenSpan, adv_positions: Sequence[int]) -> TokenSpan:
 
 
 def generate_text(model, tokenizer, input_ids, max_new_tokens: int = 128) -> str:
+    eos = tokenizer.eos_token_id
+    # Build an explicit stop-token list so models where pad==eos still stop.
+    stop_ids = list({eos} | set(getattr(tokenizer, "additional_special_tokens_ids", []) or []))
     with torch.no_grad():
         out = model.generate(
             input_ids,
             attention_mask=torch.ones_like(input_ids),
             max_new_tokens=max_new_tokens,
             do_sample=False,
-            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=stop_ids,
+            pad_token_id=eos,
         )
     return tokenizer.decode(out[0, input_ids.shape[1]:], skip_special_tokens=True)
 
