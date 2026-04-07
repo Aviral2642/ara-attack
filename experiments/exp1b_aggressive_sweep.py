@@ -85,7 +85,10 @@ def shift_span(span: TokenSpan, adv_positions: Sequence[int]) -> TokenSpan:
 def generate_text(model, tokenizer, input_ids, max_new_tokens: int = 128) -> str:
     with torch.no_grad():
         out = model.generate(
-            input_ids, max_new_tokens=max_new_tokens, do_sample=False,
+            input_ids,
+            attention_mask=torch.ones_like(input_ids),
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
             pad_token_id=tokenizer.pad_token_id,
         )
     return tokenizer.decode(out[0, input_ids.shape[1]:], skip_special_tokens=True)

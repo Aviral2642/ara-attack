@@ -280,6 +280,8 @@ class ARAAttack:
         )
 
     def _generate(self, input_ids: Tensor, attention_mask=None) -> str:
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids)
         with torch.no_grad():
             out = self.model.generate(
                 input_ids,

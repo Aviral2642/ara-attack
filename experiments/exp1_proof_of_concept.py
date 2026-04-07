@@ -67,6 +67,7 @@ def _generate(model, tokenizer, input_ids, max_new_tokens=256) -> str:
     with torch.no_grad():
         out = model.generate(
             input_ids,
+            attention_mask=torch.ones_like(input_ids),
             max_new_tokens=max_new_tokens,
             do_sample=False,
             pad_token_id=tokenizer.pad_token_id,
